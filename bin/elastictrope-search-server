@@ -1,0 +1,6 @@
+require 'elasticsearch-node/embedded'
+require 'eson-http'
+
+node = ElasticSearch::Node::Embedded.new
+
+gets

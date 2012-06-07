@@ -1,0 +1,68 @@
+GIT
+  remote: https://github.com/Asquera/eson.git
+  revision: 4767ba30530f7c8aa8d60cebaa143f26b3f2a12d
+  specs:
+    eson (0.7.0)
+      eson-core (= 0.7.0)
+      eson-dsl (= 0.7.0)
+      eson-http (= 0.7.0)
+    eson-core (0.7.0)
+      multi_json
+    eson-dsl (0.7.0)
+      multi_json
+    eson-http (0.7.0)
+      addressable
+      eson-core
+      faraday
+
+GEM
+  remote: http://rubygems.org/
+  specs:
+    addressable (2.2.8)
+    bouncy-castle-java (1.5.0146.1)
+    elasticsearch-node (0.7.1)
+    faraday (0.7.6)
+      addressable (~> 2.2)
+      multipart-post (~> 1.1)
+      rack (~> 1.1)
+    jruby-openssl (0.7.7)
+      bouncy-castle-java (>= 1.5.0146.1)
+    json (1.7.3)
+    json (1.7.3-java)
+    leveldb-ruby (0.14)
+    locale (2.0.5)
+    mime-types (1.18)
+    multi_json (1.3.6)
+    multipart-post (1.1.5)
+    rack (1.4.1)
+    rack-protection (1.2.0)
+      rack
+    rest-client (1.6.7)
+      mime-types (>= 1.16)
+    rmail (1.0.0)
+    sinatra (1.3.2)
+      rack (~> 1.3, >= 1.3.6)
+      rack-protection (~> 1.2)
+      tilt (~> 1.3, >= 1.3.3)
+    tilt (1.3.3)
+    trollop (1.16.2)
+    whistlepig (0.11.2)
+
+PLATFORMS
+  java
+
+DEPENDENCIES
+  elasticsearch-node
+  eson
+  eson-dsl!
+  eson-http!
+  faraday (~> 0.7.0)
+  jruby-openssl
+  json
+  leveldb-ruby
+  locale
+  rest-client
+  rmail
+  sinatra
+  trollop
+  whistlepig

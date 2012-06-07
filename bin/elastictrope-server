@@ -1,0 +1,683 @@
+#!/usr/bin/env ruby
+# encoding: UTF-8
+
+require 'rubygems'
+require 'json'
+require 'trollop'
+require 'sinatra/base'
+require 'whistlepig'
+require "heliotrope"
+require 'cgi'
+require 'rack'
+require 'fileutils'
+require 'elasticsearch-node/embedded'
+require 'elastictrope/meta-index'
+
+node = ElasticSearch::Node::Embedded.new
+
+class Set
+  ## apparently we're going to have to do this the hard way
+  def to_json(*a); to_a.to_json(*a) end
+end
+
+module Enumerable
+  def uniq_by; inject({}) { |h, e| h[yield(e)] ||= e; h }.values end
+end
+
+class HeliotropeServer < Sinatra::Base
+  API_VERSION = 0.1
+
+  def initialize metaindex, zmbox, hooks
+    @metaindex = metaindex
+    @zmbox = zmbox
+    @hooks = hooks
+    @search_state = [] # keep this around for optimization purposes
+    super()
+  end
+
+  helpers do
+    include Rack::Utils
+  end
+
+  get "/" do
+    redirect "/search?q=~inbox"
+  end
+
+  class RequestError < StandardError; end
+
+  error RequestError do
+    e = request.env['sinatra.error']
+    "error: " + e.message
+  end
+
+  DEFAULT_SEARCH_PAGE_SIZE = 20
+  MAX_SEARCH_PAGE_SIZE = 300
+
+  get "/info.json" do
+    content_type :json
+    { :response => :ok,
+      :status => :up,
+      :api_version => API_VERSION.to_s
+    }.to_json
+  end
+
+  ## add a message to the store after sending it. idempotent: if the message
+  ## has already been added, reports and error and does nothing. if the send
+  ## fails, reports and error and does nothing.
+  post "/message/send.json" do
+    content_type :json
+
+    rawbody = params["message"] or raise RequestError, "need a 'message' param"
+    labels = JSON.parse(params["labels"] || "[]")
+    state = JSON.parse(params["state"] || "[]")
+    extra = JSON.parse(params["extra"] || "{}")
+
+    begin
+      message = raw_body_to_message rawbody
+      if @metaindex.contains_safe_msgid? message.safe_msgid
+        { :response => :ok, :status => :seen }
+      else
+        run_sendmail! rawbody, message
+        result = add_message message, rawbody, labels, state + ["sent"], extra
+        (message.to + message.cc + message.cc).each { |c| @metaindex.touch_contact! c }
+        result
+      end
+    rescue Heliotrope::InvalidMessageError, SendmailFailedError => e
+      { :response => :error, :message => e.message }
+    end.to_json
+  end
+
+  ## sends a message without adding it to the index, or even checking whether
+  ## it's there or not. accepts a force_recipients argument to override the
+  ## recipients and ignore the To: line.
+  post "/message/bounce.json" do
+    content_type :json
+
+    rawbody = params["message"] or raise RequestError, "need a 'message' param"
+    force_recipients = JSON.parse(params["force_recipients"] || "[]")
+
+    begin
+      message = raw_body_to_message rawbody
+      run_sendmail! rawbody, message, force_recipients
+      { :response => :ok }
+    rescue Heliotrope::InvalidMessageError, SendmailFailedError => e
+      { :response => :error, :message => e.message }
+    end.to_json
+  end
+
+  SENDMAIL = "sendmail -oem -ti" # don't like it? write a sendmail hook.
+  SENDMAIL_BOUNCE = "sendmail -oem -i"
+  class SendmailFailedError < StandardError; end
+
+  def run_sendmail! rawbody, message, force_recipients=[]
+    if @hooks.enabled? "sendmail"
+      unless @hooks.run "sendmail", :rawbody => rawbody, :message => message, :force_recipients => force_recipients
+        raise SendmailFailedError, "sendmail hook was not successful"
+      end
+    else
+      cmd = if force_recipients.empty?
+        SENDMAIL
+      else
+        SENDMAIL_BOUNCE + force_recipients.map { |x| " " + x }.join
+      end
+      puts "; running: `#{cmd}` on a #{rawbody.size}b message"
+      ret = IO.popen(cmd, "w") { |p| p.puts rawbody }
+      unless $?.success?
+        raise SendmailFailedError, "sendmail command failed with non-zero exit status"
+      end
+    end
+  end
+
+  ## add a message to the store
+  post "/message.json" do
+    content_type :json
+
+    rawbody = params["message"] or raise RequestError, "need a message"
+    labels = JSON.parse(params["labels"] || "[]")
+    state = JSON.parse(params["state"] || "[]")
+    extra = JSON.parse(params["extra"] || "{}")
+
+    begin
+      message = raw_body_to_message rawbody
+      if @metaindex.contains_safe_msgid? message.safe_msgid
+        doc_id, thread_id = @metaindex.fetch_docid_for_safe_msgid message.safe_msgid
+        { :response => :ok, :status => :seen, :doc_id => doc_id, :thread_id => thread_id }
+      else
+        if @hooks.enabled? "before-add-message"
+          message, labels, state = @hooks.run "before-add-message", :message => message, :labels => labels, :state => state
+        end
+        result = add_message message, rawbody, labels, state, extra
+
+        ## add any "important" contacts to the set of all contacts we've ever seen
+        unless message.is_list_or_automated_email?
+          ## just add the sender, for now. we can think about whether to add
+          ## recipients as well later.
+          @metaindex.touch_contact! message.from
+        end
+
+        result
+      end
+    rescue Heliotrope::InvalidMessageError => e
+      { :response => :error, :error_message => e.message }
+    end.to_json
+  end
+
+  def raw_body_to_message rawbody
+    rawbody.force_encoding "binary" if rawbody.respond_to?(:force_encoding) # sigh...
+    Heliotrope::Message.new(rawbody).parse!
+  end
+
+  def add_message message, rawbody, labels, state, extra
+    loc = @zmbox.add rawbody
+    extra.merge! :loc => loc
+    doc_id, thread_id = @metaindex.add_message message, state, labels, extra
+    { :response => :ok, :status => :unseen, :doc_id => doc_id, :thread_id => thread_id }
+  end
+
+  def get_query_from_params
+    ## work around a rack (?) bug where quotes are omitted in queries like "hello bob"
+    query = if env["rack.request.query_string"] =~ /\bq=(.+?)(&|$)/
+      CGI.unescape $1
+    else
+      params["q"]
+    end
+
+    raise RequestError, "need a query" unless query
+
+    transformed = @hooks.run "transform-query", :query => query
+    transformed = Heliotrope::Decoder.encode_as_utf8 transformed
+    transformed || query
+  end
+
+  def get_search_results
+    query = get_query_from_params
+    start = (params["start"] || 0).to_i
+    num = (params["num"] || DEFAULT_SEARCH_PAGE_SIZE).to_i
+    num = DEFAULT_SEARCH_PAGE_SIZE if num <= 0
+    num = [num, MAX_SEARCH_PAGE_SIZE].min
+
+    result = @metaindex.get_some_results(start, num, "*")
+
+    continued = true
+
+#    query = Heliotrope::Query.new "body", query
+#    startt = Time.now
+#    continued = false
+#    results = if @search_state == [query.parsed_query_s, start]
+#      continued = true
+#      @metaindex.get_some_results num
+#    else
+#      @metaindex.set_query query
+#      @metaindex.get_some_results(start + num)[start, num]
+#    end
+#    elapsed = Time.now - startt
+#    printf "search(#{query.parsed_query_s}, #{start}, #{num}) took %.1fms\n", (elapsed * 1000)
+#
+#    ## remove this field from the results because it's not useful and can be large
+#    results.each { |r| r.delete :structure }
+#
+#    @search_state = [query.parsed_query_s, start + num]
+
+    [nil, result, { :start => start, :num => 20, :elapsed => 100, :continued => false }]
+  end
+
+  get "/size.json" do
+    content_type :json
+    { :response => :ok, :size => @metaindex.size }.to_json
+  end
+
+  get "/search.json" do
+    content_type :json
+    begin
+      query, results, info = get_search_results
+      { :response => :ok, :results => results }
+    rescue Heliotrope::Query::ParseError => e
+      { :response => :error, :message => e.message }
+    end.to_json
+  end
+
+  get "/count.json" do
+    content_type :json
+    query = get_query_from_params
+    query = Heliotrope::Query.new "body", query
+    startt = Time.now
+    @metaindex.set_query query
+    count = @metaindex.count_results
+    elapsed = Time.now - startt
+    printf "count(#{query.parsed_query_s}) took %.1fms\n", (elapsed * 1000)
+    @search_state = nil # don't confuse this with the regular search stuff
+    { :response => :ok, :count => count }.to_json
+  end
+
+  get "/search" do
+    content_type :html
+
+    begin
+      query, results, info = get_search_results
+      start, num = info[:start], info[:num]
+      nav = %{<div style="padding-top: 1em">}
+      if start > 0
+        nav += link_to_search(query.original_query_s, "<< top", 0, num) + "|" + link_to_search(query.original_query_s, "<< previous", [start - num, 0].max, num)
+      end
+      if (start > 0) && (results.size == num)
+        nav += "|"
+      end
+      if results.size == num
+        nav += link_to_search(query.original_query_s, "next >>", start + num, num)
+      end
+      nav += "</div>"
+
+      header("Search: #{query.original_query_s}", query.original_query_s) +
+        "<div>Parsed query: #{escape_html query.parsed_query_s}</div>" +
+        "<div>Search took #{sprintf '%.2f', info[:elapsed]}s and #{info[:continued] ? 'was' : 'was NOT'} continued</div>" +
+        "#{nav}<table>" +
+        results.map { |r| threadinfo_to_html r }.join +
+        "</table>#{nav}" + footer
+
+    rescue Heliotrope::Query::ParseError => e
+      raise RequestError, "can't parse query: #{e.message}"
+    end
+  end
+
+  ## thread info object
+  get "/thread/:thread_id/info.json" do |thread_id|
+    content_type :json
+    threadinfo = get_threadinfo thread_id
+    threadinfo.merge(:response => :ok).to_json
+  end
+
+  ## messages in the thread
+  get "/thread/:thread_id.json" do |thread_id|
+    content_type :json
+    messageinfos = get_thread_summary thread_id
+    { :messageinfos => messageinfos, :response => :ok }.to_json
+  end
+
+  get "/thread/:thread_id" do |thread_id|
+    content_type :html
+
+    messageinfos = get_thread_summary thread_id
+    first = messageinfos.find { |mi, level| mi[:subject] }[0]
+
+    header("Thread: " + first[:subject]) +
+      messageinfos.map do |mi, level|
+        %{<div style="padding-left: #{level}em">} +
+          messageinfo_to_html(mi) +
+          "</div>"
+      end.join +
+      footer
+  end
+
+  def get_thread_summary thread_id
+    @metaindex.load_thread_messageinfos(thread_id.to_i) or raise Sinatra::NotFound, "can't find thread #{thread_id.inspect}"
+  end
+
+  def get_threadinfo thread_id
+    threadinfo = @metaindex.load_threadinfo(thread_id.to_i) or raise Sinatra::NotFound, "can't find thread #{thread_id.inspect}"
+    ## the structure field for long threads is deeply nested, and the
+    ## json encoder complains about deeply-nested structures.  we could
+    ## raise its nesting limit, but this field isn't needed by anyone
+    ## (so far!), so we'll just remove it. if someone wants it later, we
+    ## can revisit.
+    threadinfo.delete :structure
+    threadinfo
+  end
+
+  def get_message_summary message_id
+    @metaindex.load_messageinfo(message_id.to_i) or raise Sinatra::NotFound, "can't find message #{message_id.inspect}"
+  end
+
+  get "/message/:message_id.json" do |message_id|
+    content_type :json
+    message_id = message_id.to_i
+    messageinfo = get_message_summary message_id
+    message = load_actual_message messageinfo[:loc]
+
+    ## merge the messageinfo (which has state, etc) with the actual content of the message
+    if params[:only_infos]
+      result = messageinfo
+    else
+      result = messageinfo.merge message.to_h(message_id, params["mime_type_pref"] || "text/html")
+    end
+    result.merge(:response => :ok).to_json
+  end
+
+  get "/message/:message_id" do |message_id|
+    content_type :html
+    message_id = message_id.to_i
+    message = get_message_summary(message_id) or raise Sinatra::NotFound, "can't find message #{message_id.inspect}"
+
+    begin
+      threadinfo = @metaindex.load_threadinfo(message[:thread_id])
+      docids = threadinfo[:structure].flatten
+      idx = docids.index(message_id) + 1
+      idx += 1 while(docids[idx] && (docids[idx] < 0))
+      header(message[:subject]) + message_to_html(message, docids[idx]) + footer
+    rescue Heliotrope::InvalidMessageError => e
+      raise RequestError, "can't parse message #{message_id.inspect}: #{e.message}"
+    end
+  end
+
+  get "/message/:message_id/part/:part_id" do |message_id, part_id|
+    message = get_message_summary message_id
+    part_id = part_id.to_i
+
+    begin
+      m = load_actual_message message[:loc]
+      parts = m.mime_parts "text/html"
+
+      raise Sinatra::NotFound, "can't find that part" unless part_id >= 0 && part_id <= parts.size
+      type, fn, id, content = parts[part_id]
+      if type =~ /^(\S+?);/
+        type = $1
+      end
+      content_type type
+      response['Content-Disposition'] = (type =~ /^(text|image)\// ? "inline" : "attachment")
+      response['Content-Disposition'] << %{; filename="#{fn}"} if fn
+      content
+    rescue Heliotrope::InvalidMessageError => e
+      raise RequestError, "can't parse message #{message_id.inspect}: #{e.message}"
+    end
+  end
+
+  get "/message/:message_id/raw" do |message_id|
+    content_type :text
+    message = get_message_summary message_id
+    @zmbox.read message[:loc]
+  end
+
+  get "/labels.json" do
+    content_type :json
+    { :labels => ["foo", "bar", "batz"], :response => :ok }.to_json
+  end
+
+  post "/labels/prune.json" do
+    content_type :json
+    @metaindex.prune_labels!
+    { :labels => @metaindex.all_labels, :response => :ok }.to_json
+  end
+
+  post "/thread/:thread_id/labels.json" do |thread_id|
+    content_type :json
+
+    labels = params["labels"] or raise RequestError, "need a 'labels' param"
+    labels = parse_json_set labels
+
+    thread = get_thread_summary thread_id # ensure it exists...
+    begin
+      @metaindex.update_thread_labels thread_id, labels
+      get_threadinfo(thread_id).merge :response => :ok
+    rescue Heliotrope::MetaIndex::InvalidLabelError => e
+      { :response => :error, :message => e.message }
+    end.to_json
+  end
+
+  post "/thread/:thread_id/state.json" do |thread_id|
+    content_type :json
+
+    state = params["state"] or raise RequestError, "need a 'state' param"
+    state = parse_json_set state
+
+    thread = get_thread_summary thread_id # ensure it exists...
+    @metaindex.update_thread_state thread_id, state
+
+    get_threadinfo(thread_id).merge(:response => :ok).to_json
+  end
+
+  post "/message/:message_id/state.json" do |message_id|
+    content_type :json
+
+    state = params["state"] or raise RequestError, "need a 'state' param"
+    state = parse_json_set state
+
+    message = get_message_summary message_id # ensure it exists...
+    @metaindex.update_message_state(message_id, state)
+
+    get_message_summary(message_id).merge(:response => :ok).to_json
+  end
+
+  get "/contacts.json" do
+    content_type :json
+
+    prefix = params["prefix"]
+    num = (params["num"] || 20).to_i
+
+    contacts = @metaindex.contacts(:prefix => prefix, :num => num).
+      sort_by { |c| -c[:timestamp] }.
+      uniq_by { |c| c[:email] }.
+      map { |c| { :name => c[:name], :email => c[:email] } }
+
+    { :response => :ok, :contacts => contacts }.to_json
+  end
+
+private
+
+  def parse_json_set val
+    begin
+      Set.new JSON.parse(val)
+    rescue JSON::ParserError => e
+      raise RequestError, "cannot parse json [#{val.inspect}]: #{e.message}"
+    end
+  end
+
+  def load_actual_message offset
+    rawbody = @zmbox.read offset
+    Heliotrope::Message.new(rawbody).parse!
+  end
+
+  def message_to_html message, next_messageid
+    mid = message[:message_id]
+    m = load_actual_message message[:loc]
+    parts = m.mime_parts "text/html"
+
+    ## build up the cid pointers for internal content
+    cids = {}
+    parts.each_with_index { |(type, fn, id, content), i| cids[id] = i if id }
+
+    s = "<div>#{link_to_threadview message[:thread_id], "<< back to thread"}"
+    s += " | #{link_to_messageview next_messageid, "next message in thread >>"}" if next_messageid
+    s += "</div>"
+    s += %{<div style="padding-top: 1em">From: #{link_to_search m.from.email.downcase, m.from.to_email_address}</div>}
+    s += "<div>To: #{m.to.map { |p| link_to_search p.email.downcase, p.to_email_address }.join(", ")}</div>"
+    s += "<div>Cc: #{m.cc.map { |p| link_to_search p.email.downcase, p.to_email_address }.join(", ")}</div>" unless m.cc.empty?
+    s += "<div>Bcc: #{m.bcc.map { |p| link_to_search p.email.downcase, p.to_email_address }.join(", ")}</div>" unless m.bcc.empty?
+    s += "<div>Date: #{Time.at m.date}</div>"
+    s += "<div>Subject: #{escape_html m.subject}</div>"
+
+    parts.each_with_index do |(type, fn, id, content), i|
+      s += %{<div style="padding-top: 1em">}
+      if fn
+        s += link_to_attachment mid, i, "[attachment: #{fn} (#{type})]"
+        if type =~ /^image\// # show a preview
+          s += inline_image(mid, i)
+        end
+      else
+        s += make_html type, content, mid, cids
+      end
+    end
+
+    s += "<div>" + link_to_raw(mid, "(view raw)") + "</div>"
+    s
+  end
+
+  ## this whole thing seems pretty dangerous...
+  def make_html type, content, message_id, cids
+    case type
+    when /^text\/html/; cids.inject(content) { |c, (k, v)| c.gsub("cid:#{k}", inline_image_link(message_id, v)) }
+    when /^text\/plain/; escape_html(content).gsub("\n", "<br/>")
+    else escape_html(content)
+    end
+  end
+
+  MAX_PARTICIPANT_WIDTH = 40
+  MAX_SUBJECT_WIDTH = 80
+
+  def threadinfo_to_html thread
+    participants = thread[:participants][0, 3].map do |v|
+      p = Heliotrope::Person.from_string(v)
+      link_to_search p.email.downcase, p.display_name
+    end.join(", ")
+
+    size = thread[:size]
+    labels = (thread[:labels] - Heliotrope::MetaIndex::MESSAGE_STATE).map do |l|
+      link_to_search "~#{l}", "+#{l}"
+    end.join(" ")
+
+    subject = thread[:subject][0, MAX_SUBJECT_WIDTH]
+    subject = "(no subject)" if subject =~ /^\s*$/
+    subject = link_to_threadview thread[:thread_id], subject
+    snippet = (thread[:snippet] || "?")
+
+    date = escape_html Time.at(thread[:date]).strftime("%Y/%m/%d %H:%M")
+
+    flags = escape_html(
+      (thread[:state].include?("starred") ? "*" : " ") +
+      (thread[:state].include?("unread") ? "N" : " ") +
+      (thread[:state].include?("attachment") ? "@" : " ") +
+      (thread[:state].include?("signed") ? "S" : " ") +
+      (thread[:state].include?("encrypted") ? "E" : " ")
+    )
+
+    <<-EOS
+<tr>
+  <td>#{flags}</td>
+  <td><div class="participants">#{participants}</div></td>
+  <td>#{size}</td>
+  <td><div class="description">#{labels} #{subject} #{escape_html snippet}</div></td>
+  <td>#{date}</td>
+</tr>
+    EOS
+  end
+
+  def messageinfo_to_html message
+    if message[:type] == "fake" # fake root
+      "<td>(an unreceived message)</td>"
+    else
+      from = Heliotrope::Person.from_string message[:from]
+      flags =
+        (message[:state].include?("starred") ? "*" : " ") +
+        (message[:state].include?("unread") ? "N" : " ") +
+        (message[:state].include?("attachment") ? "@" : " ") +
+        (message[:state].include?("signed") ? "S" : " ") +
+        (message[:state].include?("encrypted") ? "E" : " ")
+      date = escape_html Time.at(message[:date]).strftime("%Y/%m/%d %H:%M")
+      subject = link_to_messageview message[:message_id], message[:subject]
+      snippet = message[:snippet][0, MAX_SUBJECT_WIDTH - message[:subject].size]
+
+      <<-EOS
+  <span>#{flags}</span>
+  <span>#{link_to_search from.email.downcase, from.display_name}</span>
+  <span>#{link_to_messageview message[:message_id], message[:subject]}</span>
+  <span>#{escape_html snippet} ...</span>
+  <span>#{date}</span>
+      EOS
+    end
+  end
+
+  def link_to_search query, text, start=0, num=DEFAULT_SEARCH_PAGE_SIZE
+    %{<a href="/search?q=#{CGI.escape query}&start=#{start}&num=#{num}">#{escape_html text}</a>}
+  end
+
+  def link_to_threadview thread_id, text
+    %{<a href="/thread/#{thread_id}">#{escape_html text}</a>}
+  end
+
+  def link_to_messageview message_id, text
+    %{<a href="/message/#{message_id}">#{escape_html text}</a>}
+  end
+
+  def link_to_attachment message_id, part_id, text
+    %{<a href="/message/#{message_id}/part/#{part_id}">#{escape_html text}</a>}
+  end
+
+  def link_to_raw message_id, text
+    %{<a href="/message/#{message_id}/raw">#{escape_html text}</a>}
+  end
+
+  def inline_image_link message_id, part_id; "/message/#{message_id}/part/#{part_id}" end
+  def inline_image message_id, part_id; %{<img src="#{inline_image_link message_id, part_id}">} end
+
+  def header title, query=""
+    title = escape_html title
+    <<-EOS
+<!DOCTYPE html><html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><title>Heliotrope: #{title}</title>
+<meta name="application-name" content="heliotrope">
+<style type="text/css">
+div.description {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  width: 600px;
+}
+
+div.participants {
+  overflow: hidden;
+  width: 200px;
+}
+
+td {
+  white-space: nowrap;
+}
+</style>
+</head><body><h1>#{title}</h1>
+<div>
+<form method="get" action="/search">
+  #{link_to_search "~inbox", "[inbox]"}
+  Search: <input name="q" size=50 value="#{escape_html query}"/>
+  <input type="submit" value="go"/>
+  </form></div>
+    EOS
+  end
+
+  def footer
+    "</body></html>"
+  end
+end
+
+### execution begins here ###
+
+opts = Trollop::options do
+  banner <<EOS
+Usage: #{$0} [options]
+
+Where options include:
+EOS
+  opt :host, "Host interface to listen on", :default => "localhost", :short => "-H"
+  opt :port, "Port to listen on", :default => 8042
+  opt :dir, "Base directory for all index files", :default => "."
+  opt :mode, "Runtime mode", :default => "development"
+end
+
+FileUtils.mkdir_p opts.dir
+FileUtils.mkdir_p File.join(opts.dir, "index")
+store = LevelDB::DB.new File.join(opts.dir, "store")
+index = Whistlepig::Index.new File.join(opts.dir, "index", "whistlepig")
+hooks = Heliotrope::Hooks.new File.join(opts.dir, "hooks")
+metaindex = Elastictrope::MetaIndex.new
+zmbox = Heliotrope::ZMBox.new File.join(opts.dir, "messages")
+server = HeliotropeServer.new metaindex, zmbox, hooks
+
+app = if opts.mode == "development"
+  Rack::Builder.new do
+    #use Rack::CommonLogger, $stdout
+    use Rack::ShowExceptions
+    use Rack::Lint
+    run server
+  end.to_app
+else
+  server
+end
+
+## yes, we have to do this ourselves here. thanks, rack. no, i don't want to
+## run with your crummy set of commandline options.
+handler = Rack::Handler.default
+trap(:INT) do
+  if handler.respond_to?(:shutdown)
+    handler.shutdown
+  else
+    exit
+  end
+end
+
+#puts "MetaIndex contains #{metaindex.size} messages."
+
+handler.run app, :Port => opts.port, :Host => opts.host
