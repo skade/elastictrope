@@ -14,9 +14,9 @@ class ElastictropeTest < ::Test::Unit::TestCase
   class MockMessage
     def initialize opts={}
       @@ids ||= 0
-
+      
       message_id = opts[:msgid] || "msg-#{@@ids += 1}"
-
+      puts message_id
       @opts = {
         :signed? => false,
         :has_attachment? => false,

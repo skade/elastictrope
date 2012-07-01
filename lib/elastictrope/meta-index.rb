@@ -3,6 +3,7 @@ require 'set'
 require 'securerandom'
 require 'eson-dsl'
 require 'eson-http'
+require 'eson-more'
 
 class Array
   def ordered_uniq
@@ -63,6 +64,23 @@ class MetaIndex
   def wipe!
     @client.delete(:index => "_all")
     @client.create_index(:index => "mail")
+    @client.put_mapping :index => "mail",
+                        :type => 'thread',
+                        :mapping => {
+                          :thread => {
+                            :properties => {
+                              :thread_id => { :type => "string" }
+                            }
+                          }
+                        }
+
+    @client.put_mapping :index => "mail",
+                        :type => 'message',
+                        :mapping => {
+                          :message => {
+                            :_parent => { :type => "thread" }
+                          }
+                        }
   end
 
   def close
@@ -118,12 +136,11 @@ class MetaIndex
     state << "encrypted" if message.encrypted?
 
     ## add message to index
-    thread_ids, docs = (find_threads message)
+    threads = find_threads message
+    puts threads.inspect
 
-    if thread_ids.size > 0
-      puts thread_ids.inspect
-      thread_id = thread_ids.first
-      remap_docs(thread_id, docs)
+    if threads.size > 0
+      thread_id = remap_docs(threads)
     else
       thread_id = SecureRandom.uuid
     end
@@ -170,53 +187,54 @@ class MetaIndex
   end
   
   def find_threads(message)
-    return [],[] if message.refs.empty?
-    
     results = (
-      @client.search :index => @index, :size => 100 do
-        filter do |f|
-          f.or do
-            terms :message_id => message.refs
-            terms :refs       => message.refs # find messages that ref the same messages
+      @client.search :type => "thread", :index => @index do
+        filter do
+          has_child :message do
+            query { match_all }
+            filter do |f|
+              f.or do
+                ids   :values => Array(message.safe_msgid)
+                terms :message_id => message.refs
+                terms :refs       => message.refs # find messages that ref the same messages
+              end
+            end
           end
         end
       end
     )
-
-    hits = results["hits"]["hits"]
-
-    thread_ids = hits.collect {|r| r["_source"]["thread_id"] }.tap { |o| puts o.inspect; }
-
-    return thread_ids, hits
+    
+    @client.extract_hits(results).map { |h| h["_id"] }
   end
 
   # change the thread_id in all docs to the thread_id.
-  def remap_docs(thread_id, docs)
-    docs = docs.reject {|d| d["_source"]["thread_id"] == thread_id }
+  def remap_docs(thread_ids)
+    merge_into = thread_ids.shift
 
-    return if docs.empty?
-
-    @client.bulk do |b|
-      docs.each do |doc|
-        b.index :index => @index,
-                :type => "message",
-                :id => doc["_id"],
-                :doc => doc["_source"].merge("thread_id" => thread_id)
-      end
+    thread_ids.each do |merge_from|
+      @client.transplant(merge_from, merge_into)
     end
+
+    merge_into
   end
 
   def index! message, thread_id
     ## make the entry
     startt = Time.now
-    
+
     doc_to_index = message.to_h(message.safe_msgid, "text/plain").merge(:thread_id => thread_id)
-     
+
+    index = @client.index :index => @index,
+                          :type => "thread",
+                          :id => thread_id,
+                          :doc => {:id => thread_id}
+
     result = @client.index :index => @index,
                            :type => "message",
                            :id => message.safe_msgid,
                            :refresh => "true", #without this, thread building would be wonky
-                           :doc => doc_to_index
+                           :doc => doc_to_index,
+                           :parent => thread_id
 
     @index_time += Time.now - startt
 
@@ -311,7 +329,9 @@ class MetaIndex
   end
 
   def size
-    (@client.simple_search :index => @index)["hits"]["total"]
+    @client.search(:index => @index, :type => "message") do
+      query { match_all }
+    end["hits"]["total"]
   end
 
   def get_some_results start, num, query
@@ -321,20 +341,19 @@ class MetaIndex
 
     thread_ids = hits.map { |h| h["_source"]["thread_id"] }.uniq
 
-    puts thread_ids.inspect
-
-    threads = thread_ids.map do |id|
+    start_date = 12345666634
+    threads = thread_ids.zip(hits).map do |id,hit|
       {
         :thread_id => id,
         :state => ["unread"],
         :labels => ["inbox"],
-        :snippet => "blaaa!",
+        :snippet => hit["_source"]["snippet"],
         :unread_participants => ["abc@foo.com"],
         :participants => ["abc@foo.net"],
         :direct_recipients => ["abc@foo.com"],
         :indirect_recipients => ["abc@foo.net"],
-        :date => 12345666634,
-        :subject => "We are threads. We are legion."
+        :date => (start_date += 1),
+        :subject => hit["_source"]["subject"]
       }
     end
     #printf "# search %.1fms, load %.1fms\n", 1000 * (loadt - startt), 1000 * (endt - startt)
