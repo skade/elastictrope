@@ -110,20 +110,18 @@ class ElastictropeTest < ::Test::Unit::TestCase
      assert_equal threadid1, threadid2
   end
 
-#  def test_added_messages_are_available_in_search
-#    @metaindex.set_query Query.new("body", "hello")
-#    results = @metaindex.get_some_results 100
-#    assert_equal 0, results.size
-#
-#    m1 = MockMessage.new :indexable_text => "hello bob"
-#    docid, threadid = @metaindex.add_message m1
-#
-#    @metaindex.reset_query!
-#    results = @metaindex.get_some_results 100
-#    assert_equal 1, results.size
-#    assert_equal threadid, results.first[:thread_id]
-#  end
-#
+  def test_added_messages_are_available_in_search
+    results = @metaindex.get_some_results 0, 20, "hello"
+    assert_equal 0, results.size
+
+    m1 = MockMessage.new :indexable_text => "hello bob"
+    docid, threadid = @metaindex.add_message m1
+
+    results = @metaindex.get_some_results 0, 20, "hello"
+    assert_equal 1, results.size
+    assert_equal threadid, results.first[:thread_id]
+  end
+
 #  def test_added_message_state_is_preserved
 #    m1 = MockMessage.new
 #    docid, threadid = @metaindex.add_message m1, %w(unread), []

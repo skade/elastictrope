@@ -4,6 +4,7 @@ require 'securerandom'
 require 'eson-dsl'
 require 'eson-http'
 require 'eson-more'
+require 'time'
 
 class Array
   def ordered_uniq
@@ -53,7 +54,7 @@ class MetaIndex
   def initialize server = "http://localhost:9200/", index = "mail", hooks = []
     @server = server
     @index = index
-    @client = Eson::HTTP::Client.new#(:server => @server)
+    @client = Eson::HTTP::Client.new.with :index => index#(:server => @server)
     @hooks = hooks
 
     @debug = true
@@ -78,7 +79,8 @@ class MetaIndex
                         :type => 'message',
                         :mapping => {
                           :message => {
-                            :_parent => { :type => "thread" }
+                            :_parent => { :type => "thread" },
+                            :_timestamp => { :enabled => true, :format => "date_time_no_millis"}
                           }
                         }
   end
@@ -122,12 +124,6 @@ class MetaIndex
   end
 
   def add_message message, state=[], labels=[], extra={}
-    #key = "docid/#{message.safe_msgid}"
-    #if contains_key? key
-    #  docid = load_int key
-    #  threadid = load_int "thread/#{docid}"
-    #  return [docid, threadid]
-    #end
 
     state = Set.new state
     state &= MESSAGE_MUTABLE_STATE # filter to the only states the user can set
@@ -148,42 +144,6 @@ class MetaIndex
     index_docid = index! message, thread_id
     
     [index_docid, thread_id]
-
-    #docid = gen_new_docid!
-    #
-    ### write index_docid <-> docid mapping
-    #write_docid_mapping! docid, index_docid
-    #
-    ### add message to store
-    #messageinfo = write_messageinfo! message, state, docid, extra
-    #
-    ### build thread structure, collecting any labels from threads that have
-    ### been joined by adding this message.
-    #threadid, thread_structure, old_labels = thread_message! message
-    #
-    ### get the thread snippet
-    #snippet = calc_thread_snippet thread_structure
-    #
-    ### get the thread state
-    #thread_state = merge_thread_state thread_structure
-    #
-    ### calculate the labels
-    #labels = Set.new(labels) - MESSAGE_STATE # you can't set these
-    #labels += thread_state # but i can
-    ##labels += merge_thread_labels(thread_structure) # you can have these, though
-    #labels += old_labels # you can have these, though
-    #
-    ### write thread to store
-    #threadinfo = write_threadinfo!  , thread_structure, labels, thread_state, snippet
-    #
-    ### add labels to every message in the thread (for search to work)
-    #write_thread_message_labels! thread_structure, labels
-    # 
-    ### add the labels to the set of all labels we've ever seen
-    #add_labels_to_labellist! labels
-    #
-    ### congrats, you have a doc and a thread!
-    #[docid, threadid]
   end
   
   def find_threads(message)
@@ -234,6 +194,7 @@ class MetaIndex
                            :id => message.safe_msgid,
                            :refresh => "true", #without this, thread building would be wonky
                            :doc => doc_to_index,
+                           :timestamp => Time.at(message.date).iso8601,
                            :parent => thread_id
 
     @index_time += Time.now - startt
@@ -335,11 +296,11 @@ class MetaIndex
   end
 
   def get_some_results start, num, query
-    result = @client.simple_search :index => @index, :from => start, :size => num, :q => query
+    result = search_threads(start, num, query)
 
     hits = result["hits"]["hits"]
 
-    thread_ids = hits.map { |h| h["_source"]["thread_id"] }.uniq
+    thread_ids = hits.map { |h| h["_id"] }.uniq
 
     start_date = 12345666634
     threads = thread_ids.zip(hits).map do |id,hit|
@@ -358,6 +319,21 @@ class MetaIndex
     end
     #printf "# search %.1fms, load %.1fms\n", 1000 * (loadt - startt), 1000 * (endt - startt)
     threads
+  end
+
+  def search_threads(start, num, query)
+    @client.search :index => @index, :type => "thread" do
+      query {
+        top_children(:message) {
+          query {
+            script = "doc['_timestamp'].longValue"
+            custom_score(:script => script) {
+              query { query_string query }
+            }
+          }
+        }
+      }
+    end
   end
 
   def load_threadinfo threadid
