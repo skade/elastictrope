@@ -298,14 +298,12 @@ class MetaIndex
   def get_some_results start, num, query
     result = search_threads(start, num, query)
 
-    hits = result["hits"]["hits"]
-
-    thread_ids = hits.map { |h| h["_id"] }.uniq
-
-    start_date = 12345666634
-    threads = thread_ids.zip(hits).map do |id,hit|
+    threads = result["hits"]["hits"]
+    
+    start_date = 12123123123
+    threads.map do |hit|
       {
-        :thread_id => id,
+        :thread_id => hit["_id"],
         :state => ["unread"],
         :labels => ["inbox"],
         :snippet => hit["_source"]["snippet"],
@@ -318,7 +316,6 @@ class MetaIndex
       }
     end
     #printf "# search %.1fms, load %.1fms\n", 1000 * (loadt - startt), 1000 * (endt - startt)
-    threads
   end
 
   def search_threads(start, num, query)
