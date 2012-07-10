@@ -16,7 +16,7 @@ class ElastictropeTest < ::Test::Unit::TestCase
       @@ids ||= 0
       
       message_id = opts[:msgid] || "msg-#{@@ids += 1}"
-      puts message_id
+
       @opts = {
         :signed? => false,
         :has_attachment? => false,

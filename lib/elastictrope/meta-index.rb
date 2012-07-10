@@ -148,17 +148,20 @@ class MetaIndex
   end
   
   def find_threads(message)
+    client.refresh
+
     results = (
-      @client.search :type => "thread", :index => @index do
-        filter do
-          has_child :message do
-            query { match_all }
-            filter do |f|
-              f.or do
-                ids   :values => Array(message.safe_msgid)
-                terms :message_id => message.refs
-                terms :refs       => message.refs # find messages that ref the same messages
-              end
+      client.search :type => "thread" do
+        filter do |f|
+          f.or do
+            has_child :message do
+              query { ids :values => Array(message.safe_msgid) }
+            end
+            has_child :message do
+              query { terms :message_id => message.refs }
+            end
+            has_child :message do
+              query { terms :refs  => Array(message.msgid) }
             end
           end
         end
@@ -173,7 +176,9 @@ class MetaIndex
     merge_into = thread_ids.shift
 
     thread_ids.each do |merge_from|
-      @client.transplant(merge_from, merge_into)
+      client.with(:type => "thread") do |c|
+        c.merge_parents(merge_from, merge_into)
+      end
     end
 
     merge_into
