@@ -285,26 +285,27 @@ class ElastictropeTest < ::Test::Unit::TestCase
 #    assert_equal 1, @metaindex.count_results
 #  end
 #
-#  def test_adding_messages_can_join_threads
-#    m1 = MockMessage.new :msgid => "1"
-#    m3 = MockMessage.new :msgid => "3", :refs => ["2"]
-#
-#    docid1, threadid1 = @metaindex.add_message m1
-#    docid3, threadid3 = @metaindex.add_message m3
-#
-#    assert_not_equal threadid1, threadid3
-#
-#    m2 = MockMessage.new :msgid => "2", :refs => ["1"]
-#    docid2, threadid2 = @metaindex.add_message m2
-#
-#    threadid1 = @metaindex.load_messageinfo(docid1)[:thread_id]
-#    threadid2 = @metaindex.load_messageinfo(docid2)[:thread_id]
-#    threadid3 = @metaindex.load_messageinfo(docid3)[:thread_id]
-#
-#    assert_not_nil threadid1
-#    assert_equal threadid1, threadid2
-#    assert_equal threadid2, threadid3
-#  end
+  def test_adding_messages_can_join_threads
+    m1 = MockMessage.new :msgid => "1"
+    m3 = MockMessage.new :msgid => "3", :refs => ["2"]
+
+    docid1, threadid1 = @metaindex.add_message m1
+    docid3, threadid3 = @metaindex.add_message m3
+
+    assert_not_equal threadid1, threadid3
+
+    m2 = MockMessage.new :msgid => "2", :refs => ["1"]
+    docid2, threadid2 = @metaindex.add_message m2
+
+    msg1 = @metaindex.load_messageinfo(threadid2, docid1)
+    msg2 = @metaindex.load_messageinfo(threadid2, docid2)
+    msg3 = @metaindex.load_messageinfo(threadid2, docid3)
+
+    puts msg1.inspect
+    assert_not_nil msg1
+    assert_not_nil msg2
+    assert_not_nil msg3
+  end
 #
 #  def test_adding_messages_applies_labels_to_everything_in_thread_and_that_is_reflected_in_search
 #    m1 = MockMessage.new :msgid => "1"

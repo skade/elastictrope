@@ -50,6 +50,7 @@ class MetaIndex
   ## heliotrope-client as well.
 
   SNIPPET_MAX_SIZE = 100 # chars
+  attr_accessor :client
 
   def initialize server = "http://localhost:9200/", index = "mail", hooks = []
     @server = server
@@ -184,18 +185,16 @@ class MetaIndex
 
     doc_to_index = message.to_h(message.safe_msgid, "text/plain").merge(:thread_id => thread_id)
 
-    index = @client.index :index => @index,
-                          :type => "thread",
-                          :id => thread_id,
-                          :doc => {:id => thread_id}
+    index = client.index :type => "thread",
+                         :id => thread_id,
+                         :doc => {:id => thread_id}
 
-    result = @client.index :index => @index,
-                           :type => "message",
-                           :id => message.safe_msgid,
-                           :refresh => "true", #without this, thread building would be wonky
-                           :doc => doc_to_index,
-                           :timestamp => Time.at(message.date).iso8601,
-                           :parent => thread_id
+    result = client.index :type => "message",
+                          :id => message.safe_msgid,
+                          :doc => doc_to_index,
+                          :timestamp => Time.at(message.date).iso8601,
+                          :parent => thread_id
+    client.refresh
 
     @index_time += Time.now - startt
 
@@ -342,15 +341,14 @@ class MetaIndex
       :unread_participants => load_set("turps/#{threadid}")
   end
 
-  def load_messageinfo docid
-    key = "doc/#{docid}"
-    return unless contains_key? key
-    h = load_hash key
-    h.merge :state => load_set("state/#{docid}"),
-      :labels => load_set("mlabels/#{docid}"),
-      :thread_id => load_int("threadid/#{docid}"),
-      :snippet => load_string("msnip/#{docid}"),
-      :message_id => docid
+  def load_messageinfo threadid, docid
+    client.get(:type => "message", :id => docid, :routing => threadid)
+    #h = load_hash key
+    #h.merge :state => load_set("state/#{docid}"),
+    #  :labels => load_set("mlabels/#{docid}"),
+    #  :thread_id => load_int("threadid/#{docid}"),
+    #  :snippet => load_string("msnip/#{docid}"),
+    #  :message_id => docid
   end
 
   def load_thread_messageinfos threadid
