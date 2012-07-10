@@ -138,6 +138,7 @@ class MetaIndex
       thread_id = remap_docs(threads)
     else
       thread_id = SecureRandom.uuid
+      create_thread! message, thread_id, state, labels, extra
     end
 
     index_docid = index! message, thread_id, state, labels, extra
@@ -185,6 +186,16 @@ class MetaIndex
     merge_into
   end
 
+  def create_thread! message, thread_id, state, labels, extra
+    index = client.index :type => "thread",
+                         :id => thread_id,
+                         :doc => {
+                           :id => thread_id,
+                           :state => state,
+                           :labels => labels
+                         }
+  end
+
   def index! message, thread_id, state, labels, extra
     ## make the entry
     startt = Time.now
@@ -193,11 +204,6 @@ class MetaIndex
                    .merge(:thread_id => thread_id)
                    .merge(extra)
                    .merge(:labels => labels, :state => state.to_a)
-    puts doc_to_index.inspect
-
-    index = client.index :type => "thread",
-                         :id => thread_id,
-                         :doc => {:id => thread_id}
 
     result = client.index :type => "message",
                           :id => message.safe_msgid,

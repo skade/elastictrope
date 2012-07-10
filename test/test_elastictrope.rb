@@ -157,33 +157,32 @@ class ElastictropeTest < ::Test::Unit::TestCase
     assert_equal Set.new(%w(unread deleted)), Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
   end
 
-#  def test_message_state_ignores_random_stuff
-#    m1 = MockMessage.new
-#    docid, threadid = @metaindex.add_message m1, %w(hello there bob inbox unread is nice), []
-#    assert_equal Set.new(%w(unread)), @metaindex.load_messageinfo(docid)[:state]
-#  end
-#
-#  def test_added_thread_labels_are_applied_to_the_whole_thread
-#    m1 = MockMessage.new
-#    docid, threadid = @metaindex.add_message m1, [], %w(tired hungry)
-#
-#    summary = @metaindex.load_threadinfo threadid
-#    assert_equal Set.new(%w(tired hungry)), summary[:labels]
-#  end
-#
-#  def test_thread_labels_are_available_in_search
-#    m1 = MockMessage.new :indexable_text => "hello bob"
-#    docid, threadid = @metaindex.add_message m1
-#
-#    @metaindex.set_query Query.new("body", "~tired")
-#    assert_equal 0, @metaindex.count_results
-#
-#    @metaindex.update_thread_labels threadid, %w(tired)
-#    assert_equal 1, @metaindex.count_results
-#
-#    results = @metaindex.get_some_results 100
-#    assert_equal threadid, results.first[:thread_id]
-#  end
+  def test_message_state_ignores_random_stuff
+    m1 = MockMessage.new
+    docid, threadid = @metaindex.add_message m1, %w(hello there bob inbox unread is nice), []
+    assert_equal Set.new(%w(unread)), Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
+  end
+
+  def test_added_thread_labels_are_applied_to_the_whole_thread
+    m1 = MockMessage.new
+    docid, threadid = @metaindex.add_message m1, [], %w(tired hungry)
+
+    summary = @metaindex.load_threadinfo threadid
+    assert_equal Set.new(%w(tired hungry)), Set.new(summary["labels"])
+  end
+
+  #def test_thread_labels_are_available_in_search
+  #  m1 = MockMessage.new :indexable_text => "hello bob"
+  #  docid, threadid = @metaindex.add_message m1
+  #
+  #  assert_equal 0, (@metaindex.get_some_results 0, 20, "state:unread").count
+  #
+  #  @metaindex.update_thread_labels threadid, %w(tired)
+  #  assert_equal 1, @metaindex.count_results
+  #
+  #  results = @metaindex.get_some_results 100
+  #  assert_equal threadid, results.first[:thread_id]
+  #end
 #
 #  def test_thread_labels_from_added_messages_are_available_in_search
 #    @metaindex.set_query Query.new("body", "~tired")
