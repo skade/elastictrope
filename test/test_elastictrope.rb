@@ -130,31 +130,33 @@ class ElastictropeTest < ::Test::Unit::TestCase
     assert_equal Set.new(%w(unread)), Set.new(summary["state"])
   end
 
-#  def test_added_message_state_is_searchable_via_labels
-#    @metaindex.set_query Query.new("body", "~unread")
-#    assert_equal 0, @metaindex.count_results
-#
-#    m1 = MockMessage.new
-#    docid, threadid = @metaindex.add_message m1, %w(unread), []
-#
-#    assert_equal 1, @metaindex.count_results
-#  end
-#
-#  def test_message_state_is_modifiable
-#    m1 = MockMessage.new
-#    docid, threadid = @metaindex.add_message m1
-#    assert_equal Set.new, @metaindex.load_messageinfo(docid)[:state]
-#
-#    @metaindex.update_message_state docid, %w(unread)
-#    assert_equal Set.new(%w(unread)), @metaindex.load_messageinfo(docid)[:state]
-#
-#    @metaindex.update_message_state docid, %w(starred)
-#    assert_equal Set.new(%w(starred)), @metaindex.load_messageinfo(docid)[:state]
-#
-#    @metaindex.update_message_state docid, %w(unread deleted)
-#    assert_equal Set.new(%w(unread deleted)), @metaindex.load_messageinfo(docid)[:state]
-#  end
-#
+  def test_added_message_state_is_searchable_via_labels
+    results = @metaindex.get_some_results 0, 20, "state:unread"
+    assert_equal 0, results.size
+
+    m1 = MockMessage.new
+    docid, threadid = @metaindex.add_message m1, %w(unread), []
+
+    results = @metaindex.get_some_results 0, 20, "state:unread"
+
+    assert_equal 1, results.size
+  end
+
+  def test_message_state_is_modifiable
+    m1 = MockMessage.new
+    docid, threadid = @metaindex.add_message m1
+    assert_equal Set.new, Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
+
+    @metaindex.update_message_state threadid, docid, %w(unread)
+    assert_equal Set.new(%w(unread)), Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
+
+    @metaindex.update_message_state threadid, docid, %w(starred)
+    assert_equal Set.new(%w(starred)), Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
+
+    @metaindex.update_message_state threadid, docid, %w(unread deleted)
+    assert_equal Set.new(%w(unread deleted)), Set.new(@metaindex.load_messageinfo(threadid, docid)["state"])
+  end
+
 #  def test_message_state_ignores_random_stuff
 #    m1 = MockMessage.new
 #    docid, threadid = @metaindex.add_message m1, %w(hello there bob inbox unread is nice), []

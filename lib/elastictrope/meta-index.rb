@@ -237,17 +237,15 @@ class MetaIndex
   end
 
   ## returns the new message state
-  def update_message_state docid, state
+  def update_message_state threadid, docid, state
     state = Set.new(state) & MESSAGE_MUTABLE_STATE
-
-    changed, new_state = really_update_message_state docid, state
-    if changed
-      threadid = load_int "threadid/#{docid}"
-      threadinfo = load_hash "thread/#{threadid}"
-      rebuild_all_thread_metadata threadid, threadinfo
-    end
-
-    new_state
+    
+    result = client.update :type => "message",
+                  :id => docid,
+                  :script => "ctx._source.state = value",
+                  :params => { :value => state.to_a },
+                  :refresh => true,
+                  :routing => threadid
   end
 
   def update_thread_state threadid, state
