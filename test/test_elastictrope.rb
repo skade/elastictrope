@@ -122,14 +122,14 @@ class ElastictropeTest < ::Test::Unit::TestCase
     assert_equal threadid, results.first[:thread_id]
   end
 
-#  def test_added_message_state_is_preserved
-#    m1 = MockMessage.new
-#    docid, threadid = @metaindex.add_message m1, %w(unread), []
-#
-#    summary = @metaindex.load_messageinfo docid
-#    assert_equal Set.new(%w(unread)), summary[:state]
-#  end
-#
+  def test_added_message_state_is_preserved
+    m1 = MockMessage.new
+    docid, threadid = @metaindex.add_message m1, %w(unread), []
+
+    summary = @metaindex.load_messageinfo threadid, docid
+    assert_equal Set.new(%w(unread)), Set.new(summary["state"])
+  end
+
 #  def test_added_message_state_is_searchable_via_labels
 #    @metaindex.set_query Query.new("body", "~unread")
 #    assert_equal 0, @metaindex.count_results
@@ -303,7 +303,6 @@ class ElastictropeTest < ::Test::Unit::TestCase
     msg2 = @metaindex.load_messageinfo(threadid2, docid2)
     msg3 = @metaindex.load_messageinfo(threadid2, docid3)
 
-    puts msg1.inspect
     assert_not_nil msg1
     assert_not_nil msg2
     assert_not_nil msg3

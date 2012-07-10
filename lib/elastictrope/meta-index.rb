@@ -125,7 +125,6 @@ class MetaIndex
   end
 
   def add_message message, state=[], labels=[], extra={}
-
     state = Set.new state
     state &= MESSAGE_MUTABLE_STATE # filter to the only states the user can set
     state << "attachment" if message.has_attachment? # set any immutable state
@@ -134,7 +133,6 @@ class MetaIndex
 
     ## add message to index
     threads = find_threads message
-    puts threads.inspect
 
     if threads.size > 0
       thread_id = remap_docs(threads)
@@ -142,7 +140,7 @@ class MetaIndex
       thread_id = SecureRandom.uuid
     end
 
-    index_docid = index! message, thread_id
+    index_docid = index! message, thread_id, state, labels, extra
     
     [index_docid, thread_id]
   end
@@ -187,11 +185,15 @@ class MetaIndex
     merge_into
   end
 
-  def index! message, thread_id
+  def index! message, thread_id, state, labels, extra
     ## make the entry
     startt = Time.now
 
-    doc_to_index = message.to_h(message.safe_msgid, "text/plain").merge(:thread_id => thread_id)
+    doc_to_index = message.to_h(message.safe_msgid, "text/plain")
+                   .merge(:thread_id => thread_id)
+                   .merge(extra)
+                   .merge(:labels => labels, :state => state.to_a)
+    puts doc_to_index.inspect
 
     index = client.index :type => "thread",
                          :id => thread_id,
@@ -350,7 +352,7 @@ class MetaIndex
   end
 
   def load_messageinfo threadid, docid
-    client.get(:type => "message", :id => docid, :routing => threadid)
+    client.get(:type => "message", :id => docid, :routing => threadid)["_source"]
     #h = load_hash key
     #h.merge :state => load_set("state/#{docid}"),
     #  :labels => load_set("mlabels/#{docid}"),
