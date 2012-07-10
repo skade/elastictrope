@@ -163,6 +163,9 @@ class MetaIndex
             has_child :message do
               query { terms :refs  => Array(message.msgid) }
             end
+            has_child :message do
+              query { terms :refs  => message.refs }
+            end
           end
         end
       end

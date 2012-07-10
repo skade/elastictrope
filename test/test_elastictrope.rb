@@ -290,11 +290,13 @@ class ElastictropeTest < ::Test::Unit::TestCase
     m3 = MockMessage.new :msgid => "3", :refs => ["2"]
 
     docid1, threadid1 = @metaindex.add_message m1
+
     docid3, threadid3 = @metaindex.add_message m3
 
     assert_not_equal threadid1, threadid3
 
     m2 = MockMessage.new :msgid => "2", :refs => ["1"]
+
     docid2, threadid2 = @metaindex.add_message m2
 
     msg1 = @metaindex.load_messageinfo(threadid2, docid1)
